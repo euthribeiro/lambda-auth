@@ -2,7 +2,7 @@
 
 Function serverless de autenticação por CPF, Lambda authorizer e **API Gateway** do Wrench Auto Repair.
 
-FIAP · Pós-Tech · 13SOAT · Tech Challenge Fase 3 · Grupo **BGT³**
+FIAP · Pós-Tech · 15SOAT · Tech Challenge Fase 3 · Grupo **BGT³**
 
 ## Propósito
 
