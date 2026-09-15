@@ -113,7 +113,8 @@ revalida a expiração em toda requisição.
 ## Contrato com o banco
 
 A function não referencia nem copia projetos da API. Ela lê as tabelas criadas pelas migrations da
-API por um `DbContext` próprio, somente leitura e sem migrations:
+API por um `DbContext` próprio, somente leitura e sem migrations, no database do seu ambiente
+(`wrench_auto_repair_hml` em homologação, `wrench_auto_repair` em produção):
 
 | Tabela | Colunas lidas |
 |---|---|
@@ -194,11 +195,16 @@ wrench.auto.lambda.auth::wrench.auto.lambda.auth.Funcoes.AuthorizerFunction::Han
 | Pull request para `develop` ou `master` | Build, auditoria de pacotes vulneráveis, testes, `terraform fmt -check` e `validate` |
 | Push em `develop` | Testes, empacotamento e `terraform apply` no ambiente **homologacao** |
 | Push em `master` | Testes, empacotamento e `terraform apply` no ambiente **production** |
+| `workflow_dispatch` em `ci-cd.yml` | Mesmo fluxo do push, no ambiente da branch escolhida |
+| `workflow_dispatch` em `destroy.yml` com `confirmacao=DESTRUIR` | `terraform destroy` do ambiente da branch escolhida |
 
-| Ambiente | Workspace HCP | Recursos | Encaminha para |
-|---|---|---|---|
-| `homologacao` | `wrench_auto_repair_lambda_auth_homologacao` | `wrench-auth-cpf-homologacao`, `wrench-auth-authorizer-homologacao`, `wrench-api-gateway-homologacao` | `https://hml-api.bgt3.com.br` |
-| `production` | `wrench_auto_repair_lambda_auth` | `wrench-auth-cpf-production`, `wrench-auth-authorizer-production`, `wrench-api-gateway-production` | `https://api.bgt3.com.br` |
+| Ambiente | Workspace HCP | Recursos | Database | Encaminha para |
+|---|---|---|---|---|
+| `homologacao` | `wrench_auto_repair_lambda_auth_homologacao` | `wrench-auth-cpf-homologacao`, `wrench-auth-authorizer-homologacao`, `wrench-api-gateway-homologacao` | `wrench_auto_repair_hml` | `https://hml-api.bgt3.com.br` |
+| `production` | `wrench_auto_repair_lambda_auth` | `wrench-auth-cpf-production`, `wrench-auth-authorizer-production`, `wrench-api-gateway-production` | `wrench_auto_repair` | `https://api.bgt3.com.br` |
+
+O host vem do output `database_hostname` do workspace do RDS. O database é o output `database_name`
+em produção e o mesmo nome com sufixo `_hml` em homologação (output `database_name` deste stack).
 
 O workspace é escolhido por `TF_WORKSPACE` e criado no primeiro `init`, dentro do projeto informado
 em `TF_CLOUD_PROJECT`. Ele precisa ficar no mesmo projeto do workspace do RDS, porque o host e o nome
@@ -211,11 +217,25 @@ A URL do gateway aparece no resumo de cada execução do pipeline e no output `a
 
 ### Ordem de bootstrap
 
-1. `infra-k8s` e `infra-db` (`rds/` e `roles/` com o role da aplicação).
-2. `app-k8s` — primeiro deploy, que cria as tabelas pelas migrations.
-3. `infra-db` com `LAMBDA_AUTH_COLUMN_GRANTS_ENABLED=true` — aplica os grants por coluna do role
-   desta function, que exigem as tabelas existentes.
-4. `lambda-auth` — `develop` e depois `master`.
+1. `infra-k8s` e `infra-db` (`rds/` e `roles/`, com os roles e o database de homologação).
+2. `app-k8s` em `develop` e em `master` — as migrations criam as tabelas nos dois databases.
+3. `infra-db` com `LAMBDA_AUTH_GRANTS_HOMOLOGACAO=true` e `LAMBDA_AUTH_GRANTS_PRODUCTION=true` —
+   aplica os grants por coluna do role desta function, que exigem as tabelas existentes.
+4. `lambda-auth` em `develop` e em `master`.
+
+O orquestrador de provisionamento do `infra-k8s` executa essa sequência.
+
+### Destruição
+
+O workflow **Destruir Lambda de Autenticação** (`destroy.yml`) remove as Lambdas, o authorizer, o
+API Gateway, os log groups e a role IAM do ambiente da branch em que é executado (`develop` →
+`homologacao`, `master` → `production`). Só executa com a entrada `confirmacao` igual a `DESTRUIR`.
+
+* Workspace inexistente ou sem recursos é tratado como já destruído; a execução é idempotente.
+* O destroy não compila a function: um pacote ZIP provisório satisfaz a referência do Terraform.
+* A leitura do state do RDS tolera o banco já destruído, para que a ordem de destruição não trave.
+* O orquestrador de destruição do `infra-k8s` executa este workflow antes de remover aplicação,
+  banco e cluster.
 
 ### Variáveis e secrets
 

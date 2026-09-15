@@ -27,3 +27,8 @@ output "app_hostname" {
   description = "Hostname da API para onde as rotas da aplicação são encaminhadas."
   value       = var.app_hostname
 }
+
+output "database_name" {
+  description = "Database lido pela Lambda de autenticação neste ambiente."
+  value       = local.database_name
+}
