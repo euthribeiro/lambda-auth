@@ -1,0 +1,60 @@
+name: Validação de Pull Request
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    branches: ['master', 'develop']
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restaurar dependências
+        run: dotnet restore wrench.auto.lambda.auth.sln
+
+      - name: Auditar dependências vulneráveis
+        run: |
+          RELATORIO=$(dotnet list wrench.auto.lambda.auth.sln package --vulnerable --include-transitive)
+          echo "$RELATORIO"
+          if echo "$RELATORIO" | grep -qE '^\s+>'; then
+            echo "::error::Dependências com vulnerabilidade conhecida encontradas."
+            exit 1
+          fi
+
+      - name: Build
+        run: dotnet build wrench.auto.lambda.auth.sln --configuration Release --no-restore
+
+      - name: Testes
+        run: dotnet test wrench.auto.lambda.auth.sln --configuration Release --no-build --verbosity normal
+
+  terraform:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform -chdir=terraform fmt -check -recursive -diff
+
+      - name: Terraform Init
+        run: terraform -chdir=terraform init -backend=false -input=false
+
+      - name: Terraform Validate
+        run: terraform -chdir=terraform validate

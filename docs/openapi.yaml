@@ -1,0 +1,201 @@
+openapi: 3.0.3
+info:
+  title: Wrench Auto Repair — API Gateway
+  version: 1.0.0
+  description: |
+    Ponto de entrada público do Wrench Auto Repair.
+
+    - `POST /auth/cpf` é atendido pela Lambda de autenticação e devolve o JWT do cliente.
+    - As rotas `/api/...` são encaminhadas para a API no EKS. As protegidas passam antes pelo
+      Lambda authorizer, que valida o header `Authorization: Bearer <token>`; sem token válido o
+      gateway responde `401` (header ausente) ou `403` (token recusado) sem alcançar a aplicação.
+    - A API revalida o token e aplica as roles de cada endpoint. A especificação completa dos
+      endpoints da aplicação está no Scalar da API (`/docs-ui`) e na coleção Postman do `app-k8s`.
+servers:
+  - url: https://{apiId}.execute-api.us-east-1.amazonaws.com
+    description: URL do gateway, exibida no resumo do pipeline de cada ambiente.
+    variables:
+      apiId:
+        default: seu-api-id
+tags:
+  - name: Autenticação
+  - name: Rotas públicas encaminhadas à API
+  - name: Rotas protegidas encaminhadas à API
+paths:
+  /auth/cpf:
+    post:
+      tags: [Autenticação]
+      summary: Autentica o cliente pelo CPF ou CNPJ
+      description: Valida os dígitos verificadores, consulta existência e status do cliente e emite o JWT.
+      parameters:
+        - $ref: '#/components/parameters/CorrelationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequisicaoAutenticacao'
+            example:
+              documento: 529.982.247-25
+      responses:
+        '200':
+          description: Cliente autenticado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenEmitido'
+        '400':
+          description: Corpo inválido ou documento com dígitos verificadores incorretos.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+        '403':
+          description: Cliente inativo, ou usuário vinculado não tem o perfil Cliente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+        '404':
+          description: Documento sem cliente cadastrado ou sem usuário vinculado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+        '500':
+          description: Falha inesperada; o detalhe fica só no log da function.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+  /api/v1/autenticacao:
+    post:
+      tags: [Rotas públicas encaminhadas à API]
+      summary: Login de funcionário por e-mail e senha
+      responses:
+        '200':
+          description: Resposta da API.
+  /api/v1/usuario/primeiro-acesso:
+    put:
+      tags: [Rotas públicas encaminhadas à API]
+      summary: Definição de senha no primeiro acesso
+      responses:
+        '200':
+          description: Resposta da API.
+  /api/v1/ordem-servico/{id}:
+    get:
+      tags: [Rotas públicas encaminhadas à API]
+      summary: Acompanhamento de uma ordem de serviço
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Resposta da API.
+  /health:
+    get:
+      tags: [Rotas públicas encaminhadas à API]
+      summary: Liveness da API
+      responses:
+        '200':
+          description: API no ar.
+  /health/ready:
+    get:
+      tags: [Rotas públicas encaminhadas à API]
+      summary: Readiness da API (migrations e contextos)
+      responses:
+        '200':
+          description: API pronta.
+        '503':
+          description: API ainda não pronta.
+  /api/{proxy}:
+    parameters:
+      - name: proxy
+        in: path
+        required: true
+        description: Qualquer caminho da API, por exemplo `v1/orcamento/{id}/aprovar`.
+        schema:
+          type: string
+    get:
+      tags: [Rotas protegidas encaminhadas à API]
+      summary: Demais rotas da API, protegidas pelo authorizer
+      security:
+        - bearerAuth: []
+      responses:
+        '401':
+          description: Header Authorization ausente.
+        '403':
+          description: Token recusado pelo authorizer ou role insuficiente na API.
+    post:
+      tags: [Rotas protegidas encaminhadas à API]
+      summary: Demais rotas da API, protegidas pelo authorizer
+      security:
+        - bearerAuth: []
+      responses:
+        '401':
+          description: Header Authorization ausente.
+        '403':
+          description: Token recusado pelo authorizer ou role insuficiente na API.
+    put:
+      tags: [Rotas protegidas encaminhadas à API]
+      summary: Demais rotas da API, protegidas pelo authorizer
+      security:
+        - bearerAuth: []
+      responses:
+        '401':
+          description: Header Authorization ausente.
+        '403':
+          description: Token recusado pelo authorizer ou role insuficiente na API.
+    delete:
+      tags: [Rotas protegidas encaminhadas à API]
+      summary: Demais rotas da API, protegidas pelo authorizer
+      security:
+        - bearerAuth: []
+      responses:
+        '401':
+          description: Header Authorization ausente.
+        '403':
+          description: Token recusado pelo authorizer ou role insuficiente na API.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    CorrelationId:
+      name: X-Correlation-ID
+      in: header
+      required: false
+      description: Identificador de correlação devolvido na resposta; quando ausente, a function usa o request id da Lambda.
+      schema:
+        type: string
+  schemas:
+    RequisicaoAutenticacao:
+      type: object
+      required: [documento]
+      properties:
+        documento:
+          type: string
+          description: CPF (11 dígitos) ou CNPJ (14 dígitos), com ou sem pontuação.
+    TokenEmitido:
+      type: object
+      properties:
+        token:
+          type: string
+          description: JWT HS256 com validade de 30 minutos.
+        username:
+          type: string
+          description: E-mail do usuário.
+        role:
+          type: string
+          example: Cliente
+    Erro:
+      type: object
+      properties:
+        mensagem:
+          type: string

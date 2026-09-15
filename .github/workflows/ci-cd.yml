@@ -1,0 +1,129 @@
+name: Lambda de Autenticação
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: ['master', 'develop']
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restaurar dependências
+        run: dotnet restore wrench.auto.lambda.auth.sln
+
+      - name: Auditar dependências vulneráveis
+        run: |
+          RELATORIO=$(dotnet list wrench.auto.lambda.auth.sln package --vulnerable --include-transitive)
+          echo "$RELATORIO"
+          if echo "$RELATORIO" | grep -qE '^\s+>'; then
+            echo "::error::Dependências com vulnerabilidade conhecida encontradas."
+            exit 1
+          fi
+
+      - name: Build
+        run: dotnet build wrench.auto.lambda.auth.sln --configuration Release --no-restore
+
+      - name: Testes
+        run: dotnet test wrench.auto.lambda.auth.sln --configuration Release --no-build --verbosity normal
+
+  deploy:
+    needs: build-and-test
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/master' && 'production' || 'homologacao' }}
+
+    concurrency:
+      group: lambda-auth-${{ github.ref_name }}
+      cancel-in-progress: false
+
+    env:
+      AMBIENTE: ${{ github.ref == 'refs/heads/master' && 'production' || 'homologacao' }}
+      APP_HOSTNAME: ${{ github.ref == 'refs/heads/master' && 'api.bgt3.com.br' || 'hml-api.bgt3.com.br' }}
+      TF_WORKSPACE: ${{ github.ref == 'refs/heads/master' && 'wrench_auto_repair_lambda_auth' || 'wrench_auto_repair_lambda_auth_homologacao' }}
+      TF_CLOUD_PROJECT: ${{ vars.TFC_PROJECT || 'Wrench Auto Repair' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publicar function
+        run: |
+          dotnet publish src/wrench.auto.lambda.auth/wrench.auto.lambda.auth.csproj \
+            --configuration Release \
+            --runtime linux-x64 \
+            --self-contained false \
+            -p:PublishReadyToRun=true \
+            --output publish
+
+      - name: Empacotar ZIP
+        run: |
+          mkdir -p terraform/build
+          cd publish
+          zip -qr ../terraform/build/wrench-auth.zip .
+
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform Init
+        run: terraform -chdir=terraform init -input=false
+
+      - name: Terraform Apply (Lambdas + API Gateway)
+        env:
+          JWT_SIGNING_KEY: ${{ secrets.JWT_SIGNING_KEY }}
+          DB_USERNAME: ${{ secrets.LAMBDA_AUTH_DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.LAMBDA_AUTH_DB_PASSWORD }}
+          REGION: ${{ vars.AWS_REGION }}
+          TFC_ORGANIZATION: ${{ vars.TFC_ORGANIZATION }}
+          RDS_WORKSPACE: ${{ vars.TFC_WORKSPACE_RDS }}
+        run: |
+          terraform -chdir=terraform apply -auto-approve -input=false \
+            -var="environment=$AMBIENTE" \
+            -var="region=$REGION" \
+            -var="app_hostname=$APP_HOSTNAME" \
+            -var="jwt_signing_key=$JWT_SIGNING_KEY" \
+            -var="database_username=$DB_USERNAME" \
+            -var="database_password=$DB_PASSWORD" \
+            -var="tfc_organization=$TFC_ORGANIZATION" \
+            -var="rds_workspace=$RDS_WORKSPACE"
+
+      - name: Publicar URL do gateway
+        run: |
+          URL=$(terraform -chdir=terraform output -raw api_gateway_url)
+          echo "API Gateway ($AMBIENTE): $URL"
+          {
+            echo "### API Gateway — $AMBIENTE"
+            echo ""
+            echo "| Item | Valor |"
+            echo "|---|---|"
+            echo "| URL base | $URL |"
+            echo "| Autenticação por CPF | \`POST $URL/auth/cpf\` |"
+            echo "| Rotas da API | \`$URL/api/v1/...\` → \`https://$APP_HOSTNAME\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
