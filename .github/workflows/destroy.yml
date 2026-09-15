@@ -1,0 +1,118 @@
+name: Destruir Lambda de Autenticação
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmacao:
+        description: 'Digite DESTRUIR para remover as Lambdas e o API Gateway do ambiente desta branch (develop = homologacao, master = production)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/master' && 'production' || 'homologacao' }}
+
+    concurrency:
+      group: lambda-auth-${{ github.ref_name }}
+      cancel-in-progress: false
+
+    env:
+      AMBIENTE: ${{ github.ref == 'refs/heads/master' && 'production' || 'homologacao' }}
+      APP_HOSTNAME: ${{ github.ref == 'refs/heads/master' && 'api.bgt3.com.br' || 'hml-api.bgt3.com.br' }}
+      TF_WORKSPACE: ${{ github.ref == 'refs/heads/master' && 'wrench_auto_repair_lambda_auth' || 'wrench_auto_repair_lambda_auth_homologacao' }}
+      TF_CLOUD_PROJECT: ${{ vars.TFC_PROJECT || 'Wrench Auto Repair' }}
+      TFC_ORGANIZATION: ${{ vars.TFC_ORGANIZATION || 'bgt3' }}
+
+    steps:
+      - name: Conferir confirmação e branch
+        env:
+          CONFIRMACAO: ${{ inputs.confirmacao }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ "$CONFIRMACAO" != "DESTRUIR" ]; then
+            echo "::error::Confirmação inválida. Digite DESTRUIR para prosseguir."
+            exit 1
+          fi
+          if [ "$BRANCH" != "master" ] && [ "$BRANCH" != "develop" ]; then
+            echo "::error::Execute a partir de develop (homologacao) ou master (production)."
+            exit 1
+          fi
+
+      - name: Verificar workspace no HCP Terraform
+        id: workspace
+        env:
+          TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
+        run: |
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $TF_API_TOKEN" \
+            -H "Content-Type: application/vnd.api+json" \
+            "https://app.terraform.io/api/v2/organizations/$TFC_ORGANIZATION/workspaces/$TF_WORKSPACE")
+          if [ "$STATUS" = "404" ]; then
+            echo "Workspace $TF_WORKSPACE não existe; nada a destruir em $AMBIENTE." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "existe=false" >> "$GITHUB_OUTPUT"
+          elif [ "$STATUS" = "200" ]; then
+            echo "existe=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Consulta ao HCP Terraform devolveu HTTP $STATUS."
+            exit 1
+          fi
+
+      - name: Checkout
+        if: steps.workspace.outputs.existe == 'true'
+        uses: actions/checkout@v4
+
+      - name: Criar pacote vazio para o destroy
+        if: steps.workspace.outputs.existe == 'true'
+        run: |
+          mkdir -p terraform/build
+          echo "destroy" > terraform/build/placeholder.txt
+          (cd terraform/build && zip -q wrench-auth.zip placeholder.txt)
+
+      - name: Configurar credenciais AWS
+        if: steps.workspace.outputs.existe == 'true'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Setup Terraform
+        if: steps.workspace.outputs.existe == 'true'
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      - name: Terraform Init
+        if: steps.workspace.outputs.existe == 'true'
+        run: terraform -chdir=terraform init -input=false
+
+      - name: Terraform Destroy (Lambdas + API Gateway)
+        if: steps.workspace.outputs.existe == 'true'
+        env:
+          JWT_SIGNING_KEY: ${{ secrets.JWT_SIGNING_KEY }}
+          DB_USERNAME: ${{ secrets.LAMBDA_AUTH_DB_USERNAME }}
+          DB_PASSWORD: ${{ secrets.LAMBDA_AUTH_DB_PASSWORD }}
+          REGION: ${{ vars.AWS_REGION }}
+          RDS_WORKSPACE: ${{ vars.TFC_WORKSPACE_RDS }}
+        run: |
+          RECURSOS=$(terraform -chdir=terraform state list 2>/dev/null || true)
+          if [ -z "$RECURSOS" ]; then
+            echo "Workspace $TF_WORKSPACE sem recursos; nada a destruir em $AMBIENTE." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          terraform -chdir=terraform apply -destroy -auto-approve -input=false \
+            -var="environment=$AMBIENTE" \
+            -var="region=$REGION" \
+            -var="app_hostname=$APP_HOSTNAME" \
+            -var="jwt_signing_key=${JWT_SIGNING_KEY:-destroy-sem-chave-000000000000000000}" \
+            -var="database_username=${DB_USERNAME:-destroy}" \
+            -var="database_password=${DB_PASSWORD:-destroy}" \
+            -var="tfc_organization=$TFC_ORGANIZATION" \
+            -var="rds_workspace=${RDS_WORKSPACE:-wrench_auto_repair_rds}"
+          echo "Lambdas e API Gateway de $AMBIENTE destruídos." | tee -a "$GITHUB_STEP_SUMMARY"

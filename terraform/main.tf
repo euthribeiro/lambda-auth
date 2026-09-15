@@ -1,6 +1,10 @@
 locals {
   pacote = "${path.module}/${var.package_path}"
 
+  database_hostname = try(data.terraform_remote_state.rds.outputs.database_hostname, "")
+  database_base     = try(data.terraform_remote_state.rds.outputs.database_name, "")
+  database_name     = var.environment == "homologacao" ? "${local.database_base}_hml" : local.database_base
+
   nome_funcao_autenticacao = "wrench-auth-cpf-${var.environment}"
   nome_funcao_authorizer   = "wrench-auth-authorizer-${var.environment}"
   nome_gateway             = "wrench-api-gateway-${var.environment}"
@@ -9,9 +13,9 @@ locals {
   handler_authorizer   = "wrench.auto.lambda.auth::wrench.auto.lambda.auth.Funcoes.AuthorizerFunction::HandleAsync"
 
   connection_string = join(";", [
-    "Host=${data.terraform_remote_state.rds.outputs.database_hostname}",
+    "Host=${local.database_hostname}",
     "Port=5432",
-    "Database=${data.terraform_remote_state.rds.outputs.database_name}",
+    "Database=${local.database_name}",
     "Username=${var.database_username}",
     "Password=${var.database_password}",
     "SSL Mode=Require",
